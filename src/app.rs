@@ -78,6 +78,7 @@ const ID_PRESET: i32 = 110;
 const ID_RESTORE: i32 = 120;
 const ID_RESTORE_ALL: i32 = 121;
 const ID_TOPMOST: i32 = 122;
+const ID_SHOW_WINDOW_NAME: i32 = 123;
 const ID_CHANGED_TITLE: i32 = 126;
 const ID_CHANGED_LIST: i32 = 128;
 const ID_SETTINGS: i32 = 130;
@@ -364,6 +365,7 @@ fn control_caption(id: i32) -> Option<&'static str> {
         ID_REFRESH => tr("刷新", "Refresh"),
         ID_TARGET => tr("未选择窗口", "No selection"),
         ID_TOPMOST => tr("置顶", "On top"),
+        ID_SHOW_WINDOW_NAME => tr("显示名称", "Show name"),
         5 => tr("透明度", "Transparency"),
         ID_RESTORE => tr("恢复当前", "Restore current"),
         ID_RESTORE_ALL | ID_HOTKEY_LABEL => tr("恢复全部", "Restore all"),
@@ -1313,6 +1315,7 @@ struct App {
     picking: bool,
     picker_tooltip: Option<ControlTooltip>,
     refresh_tooltip: Option<ControlTooltip>,
+    name_tooltip: Option<ControlTooltip>,
     picker_overlay: Option<PickerOverlay>,
     picker_warning: Option<String>,
     hotkey: bool,
@@ -1369,6 +1372,7 @@ impl App {
             picking: false,
             picker_tooltip: None,
             refresh_tooltip: None,
+            name_tooltip: None,
             picker_overlay: None,
             picker_warning: None,
             hotkey: false,
@@ -1460,6 +1464,12 @@ impl App {
     unsafe fn initialize(&mut self, hwnd: HWND) -> Result<(), String> {
         self.hwnd = hwnd;
         crate::window_topmost::configure(hwnd, APP_EVENT, EVENT_TOPMOST_COMPLETED);
+        self.add(
+            "BUTTON",
+            "显示名称",
+            ID_SHOW_WINDOW_NAME,
+            WS_TABSTOP | BS_OWNERDRAW as u32,
+        )?;
         self.add(
             "BUTTON",
             "置顶",
@@ -1829,6 +1839,11 @@ impl App {
             self.control(ID_REFRESH),
             tr("刷新窗口列表", "Refresh window list"),
         );
+        self.name_tooltip = ControlTooltip::new(
+            hwnd,
+            self.control(ID_SHOW_WINDOW_NAME),
+            tr("隐藏顶部窗口名称", "Hide the window name above"),
+        );
         SendMessageW(self.control(ID_SLIDER), TBM_SETRANGEMIN, 0, 0);
         SendMessageW(self.control(ID_SLIDER), TBM_SETRANGEMAX, 1, 100);
         SendMessageW(self.control(ID_SLIDER), TBM_SETPAGESIZE, 0, 5);
@@ -1983,9 +1998,13 @@ impl App {
             } else {
                 fonts[0]
             };
-            for tooltip in [self.picker_tooltip.as_ref(), self.refresh_tooltip.as_ref()]
-                .into_iter()
-                .flatten()
+            for tooltip in [
+                self.picker_tooltip.as_ref(),
+                self.refresh_tooltip.as_ref(),
+                self.name_tooltip.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
             {
                 SendMessageW(tooltip.hwnd, WM_SETFONT, tooltip_font as usize, 0);
             }
@@ -2034,7 +2053,36 @@ impl App {
         let scroll_offset = panel.scroll_offset();
         let english = self.settings.language == Language::English;
         let about_value_left = if english { 60 } else { 46 };
-        let topmost_width = if english { 72 } else { 44 };
+        // 按实际字体测量复选框内容，避免中英文预留宽度造成不同的图标间距
+        let topmost_width = ui_theme::compact_checkbox_width(self.control(ID_TOPMOST))
+            .unwrap_or_else(|| pixel(if english { 72 } else { 44 }, dpi));
+        let name_toggle_width = pixel(24, dpi);
+        let topmost_left = rect.right - pixel(10, dpi) - topmost_width;
+        let name_toggle_left = topmost_left - name_toggle_width - 6;
+        let name_row_bounds = [
+            (
+                ID_TARGET,
+                [
+                    pixel(12, dpi),
+                    pixel(42, dpi),
+                    name_toggle_left - pixel(20, dpi),
+                    pixel(32, dpi),
+                ],
+            ),
+            (
+                ID_SHOW_WINDOW_NAME,
+                [
+                    name_toggle_left,
+                    pixel(46, dpi),
+                    name_toggle_width,
+                    pixel(24, dpi),
+                ],
+            ),
+            (
+                ID_TOPMOST,
+                [topmost_left, pixel(46, dpi), topmost_width, pixel(24, dpi)],
+            ),
+        ];
         let hotkey_label_width = if english { 78 } else { 56 };
         let hotkey_input_left = hotkey_label_width + 18;
         let hotkey_enabled_width = if english { 88 } else { 64 };
@@ -2054,14 +2102,6 @@ impl App {
             (ID_PICK, 12, 8, 32, 32),
             (ID_WINDOWS, 52, 8, width - 104, 280),
             (ID_REFRESH, width - 44, 8, 32, 32),
-            (ID_TARGET, 12, 42, width - topmost_width - 48, 32),
-            (
-                ID_TOPMOST,
-                width - topmost_width - 12,
-                46,
-                topmost_width,
-                24,
-            ),
             (5, 12, 80, width - 100, 18),
             (ID_VALUE, width - 80, 72, 68, 28),
             (ID_SLIDER, 8, 100, width - 16, 32),
@@ -2159,7 +2199,7 @@ impl App {
                 32,
             ));
         }
-        let positions: Vec<_> = positions
+        let mut positions: Vec<_> = positions
             .into_iter()
             .filter_map(|(id, x, y, width, height)| {
                 let control = self.controls.iter().find(|control| control.id == id)?;
@@ -2182,6 +2222,13 @@ impl App {
                 (control.bounds != Some(bounds)).then_some((control.hwnd, bounds))
             })
             .collect();
+        for (id, bounds) in name_row_bounds {
+            if let Some(control) = self.controls.iter().find(|control| control.id == id) {
+                if control.bounds != Some(bounds) {
+                    positions.push((control.hwnd, bounds));
+                }
+            }
+        }
         // 两种父窗口分别批量布局，避免跨父窗口的 DeferWindowPos 批次失败
         let (body_positions, root_positions): (Vec<_>, Vec<_>) = positions
             .iter()
@@ -2243,6 +2290,9 @@ impl App {
     }
 
     unsafe fn update_page_visibility(&self) {
+        if let Some(tooltip) = &self.name_tooltip {
+            tooltip.set_active(!self.settings_page && !self.picking);
+        }
         if let Some(tooltip) = &self.picker_tooltip {
             tooltip.set_active(!self.settings_page && !self.picking);
         }
@@ -2251,6 +2301,7 @@ impl App {
         }
         for control in &self.controls {
             let visible = match control.id {
+                ID_TARGET => !self.settings_page && self.settings.show_window_name,
                 ID_SETTINGS => true,
                 ID_SELF_LABEL | ID_SELF_SLIDER => !self.settings_page,
                 ID_SETTINGS_TITLE..=ID_HOTKEY_ENABLED => self.settings_page,
@@ -2348,7 +2399,22 @@ impl App {
             );
         }
         self.sync_language_selection();
+        self.sync_name_button();
         InvalidateRect(self.control(ID_HOTKEY_INPUT), null(), 0);
+    }
+
+    unsafe fn sync_name_button(&mut self) {
+        let button = self.control(ID_SHOW_WINDOW_NAME);
+        let caption = if self.settings.show_window_name {
+            tr("隐藏顶部窗口名称", "Hide the window name above")
+        } else {
+            tr("显示顶部窗口名称", "Show the window name above")
+        };
+        set_text(button, caption);
+        set_button_selected(button, self.settings.show_window_name);
+        if let Some(tooltip) = &mut self.name_tooltip {
+            tooltip.update_caption(self.hwnd, button, caption);
+        }
     }
 
     unsafe fn sync_language_selection(&self) {
@@ -2492,23 +2558,38 @@ impl App {
         let mut settings = self.settings.clone();
         match id {
             ID_SHOW_ICONS => settings.show_icons = self.checked(id),
+            ID_SHOW_WINDOW_NAME => settings.show_window_name = !self.settings.show_window_name,
             ID_PRIVACY => settings.privacy_mode = self.checked(id),
             _ => return,
         }
         settings.self_transparency = self.self_transparency;
         if let Err(error) = settings.save() {
-            self.set_checked(
-                id,
-                if id == ID_SHOW_ICONS {
-                    self.settings.show_icons
-                } else {
-                    self.settings.privacy_mode
-                },
-            );
+            if id == ID_SHOW_WINDOW_NAME {
+                self.sync_name_button();
+            } else {
+                self.set_checked(
+                    id,
+                    match id {
+                        ID_SHOW_ICONS => self.settings.show_icons,
+                        _ => self.settings.privacy_mode,
+                    },
+                );
+            }
             self.report_error(&error);
             return;
         }
         self.settings = settings;
+        if id == ID_SHOW_WINDOW_NAME {
+            self.sync_name_button();
+            self.update_page_visibility();
+            RedrawWindow(
+                self.hwnd,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE,
+            );
+            return;
+        }
         // 开启隐私时也脱敏已经排队、尚未展示的错误
         if let Some(error) = self.pending_error.take() {
             self.pending_error = Some(if self.settings.privacy_mode {
@@ -3024,6 +3105,10 @@ impl App {
     }
 
     unsafe fn update_enabled(&self) {
+        EnableWindow(self.control(ID_SHOW_WINDOW_NAME), (!self.picking) as i32);
+        if let Some(tooltip) = &self.name_tooltip {
+            tooltip.set_active(!self.settings_page && !self.picking);
+        }
         let available = self.selected_valid && !self.picking;
         EnableWindow(self.control(ID_SLIDER), available as i32);
         for id in ID_PRESET..ID_PRESET + 5 {
@@ -3880,7 +3965,9 @@ impl App {
                     ID_SETTINGS_BACK => self.show_page(false),
                     ID_CLOSE_TO_TRAY => self.set_close_to_tray(),
                     ID_DEFAULT_CONTAINER => self.set_default_container(),
-                    ID_SHOW_ICONS | ID_PRIVACY => self.set_display_option(id as i32),
+                    ID_SHOW_ICONS | ID_PRIVACY | ID_SHOW_WINDOW_NAME => {
+                        self.set_display_option(id as i32)
+                    }
                     ID_HOTKEY_ENABLED => self.enable_hotkey_controls(),
                     ID_HOTKEY_SAVE => self.save_hotkey(),
                     ID_PRESETS_SAVE => self.save_preset_levels(),
@@ -3949,6 +4036,7 @@ impl Drop for App {
             self.picker_overlay = None;
             self.picker_tooltip = None;
             self.refresh_tooltip = None;
+            self.name_tooltip = None;
             self.settings_panel = None;
             ui_theme::set_window_badges(std::iter::empty());
             PICK_FINISH.with(|pending| {
@@ -4239,6 +4327,7 @@ unsafe extern "system" fn window_proc(
                 let style = match item.CtlID as i32 {
                     ID_PICK => ButtonStyle::Picker,
                     ID_REFRESH => ButtonStyle::Refresh,
+                    ID_SHOW_WINDOW_NAME => ButtonStyle::NameVisibility,
                     ID_SETTINGS => ButtonStyle::Icon,
                     ID_SETTINGS_BACK => ButtonStyle::Back,
                     ID_EXIT => ButtonStyle::Primary,

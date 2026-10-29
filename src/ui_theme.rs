@@ -186,6 +186,7 @@ fn window_badges(window: usize) -> WindowBadges {
 pub enum ButtonStyle {
     Picker,
     Refresh,
+    NameVisibility,
     Back,
     Primary,
     Secondary,
@@ -462,6 +463,28 @@ unsafe fn paint_compact_checkbox(hwnd: HWND, dc: HDC, hovered: bool) {
         }
     }
     draw_compact_checkbox(hwnd, dc, rect, hovered);
+}
+
+pub unsafe fn compact_checkbox_width(hwnd: HWND) -> Option<i32> {
+    let dc = GetDC(hwnd);
+    if dc.is_null() {
+        return None;
+    }
+    let width = (|| {
+        let _saved = SavedDc::new(dc)?;
+        font_for(dc, hwnd);
+        let length = GetWindowTextLengthW(hwnd).max(0) as usize;
+        let mut text = vec![0_u16; length + 1];
+        let copied = GetWindowTextW(hwnd, text.as_mut_ptr(), text.len() as i32);
+        let mut size: SIZE = zeroed();
+        if copied <= 0 || GetTextExtentPoint32W(dc, text.as_ptr(), copied, &mut size) == 0 {
+            return None;
+        }
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        Some(size.cx + pixels(12, dpi) + pixels(4, dpi))
+    })();
+    ReleaseDC(hwnd, dc);
+    width
 }
 
 unsafe fn draw_compact_checkbox(hwnd: HWND, dc: HDC, rect: RECT, hovered: bool) -> bool {
@@ -2113,6 +2136,94 @@ pub unsafe fn draw_button(item: &DRAWITEMSTRUCT, style: ButtonStyle, selected: b
     draw_button_content(item, style, selected);
 }
 
+unsafe fn name_visibility_icon(dc: HDC, rect: RECT, dpi: u32, color: COLORREF, visible: bool) {
+    let scale = 16.0 * dpi.max(96) as f32 / (96.0 * 24.0);
+    if scaled_icon_path_antialiased(
+        dc,
+        rect,
+        color,
+        scale,
+        2.0 * scale,
+        |path, cx, cy, scale| {
+            for direction in [-1.0, 1.0] {
+                if gdip::GdipStartPathFigure(path) != gdip::Ok
+                    || gdip::GdipAddPathBezier(
+                        path,
+                        cx - 10.0 * scale,
+                        cy,
+                        cx - 5.0 * scale,
+                        cy + direction * 8.0 * scale,
+                        cx + 5.0 * scale,
+                        cy + direction * 8.0 * scale,
+                        cx + 10.0 * scale,
+                        cy,
+                    ) != gdip::Ok
+                {
+                    return false;
+                }
+            }
+            if gdip::GdipStartPathFigure(path) != gdip::Ok {
+                return false;
+            }
+            if visible {
+                gdip::GdipAddPathEllipse(
+                    path,
+                    cx - 3.0 * scale,
+                    cy - 3.0 * scale,
+                    6.0 * scale,
+                    6.0 * scale,
+                ) == gdip::Ok
+            } else {
+                gdip::GdipAddPathLine(
+                    path,
+                    cx - 9.0 * scale,
+                    cy - 9.0 * scale,
+                    cx + 9.0 * scale,
+                    cy + 9.0 * scale,
+                ) == gdip::Ok
+            }
+        },
+    ) {
+        return;
+    }
+    let Some(saved) = SavedDc::new(dc) else {
+        return;
+    };
+    let cx = (rect.left + rect.right) as f32 / 2.0;
+    let cy = (rect.top + rect.bottom) as f32 / 2.0;
+    let pen = CreatePen(PS_SOLID, (2.0 * scale).round().max(1.0) as i32, color);
+    if pen.is_null() {
+        return;
+    }
+    SelectObject(dc, pen);
+    SelectObject(dc, GetStockObject(NULL_BRUSH));
+    let point = |x: f32, y: f32| POINT {
+        x: (cx + x * scale).round() as i32,
+        y: (cy + y * scale).round() as i32,
+    };
+    for direction in [-1.0, 1.0] {
+        let curve = [
+            point(-10.0, 0.0),
+            point(-5.0, direction * 8.0),
+            point(5.0, direction * 8.0),
+            point(10.0, 0.0),
+        ];
+        PolyBezier(dc, curve.as_ptr(), curve.len() as u32);
+    }
+    if visible {
+        let first = point(-3.0, -3.0);
+        let last = point(3.0, 3.0);
+        Ellipse(dc, first.x, first.y, last.x, last.y);
+    } else {
+        let first = point(-9.0, -9.0);
+        let last = point(9.0, 9.0);
+        MoveToEx(dc, first.x, first.y, null_mut());
+        LineTo(dc, last.x, last.y);
+    }
+    drop(saved);
+    DeleteObject(pen);
+}
+
 unsafe fn draw_button_content(item: &DRAWITEMSTRUCT, style: ButtonStyle, selected: bool) -> bool {
     let Some(_saved) = SavedDc::new(item.hDC) else {
         return false;
@@ -2121,6 +2232,36 @@ unsafe fn draw_button_content(item: &DRAWITEMSTRUCT, style: ButtonStyle, selecte
     let disabled = item.itemState & (ODS_DISABLED | ODS_GRAYED) != 0;
     let pressed = item.itemState & ODS_SELECTED != 0;
     let hot = !disabled && hovered(item.hwndItem);
+    // 名称行使用轻量图标按钮，常态不绘制外框或选中底色
+    if matches!(style, ButtonStyle::NameVisibility) {
+        fill(item.hDC, &item.rcItem, BACKGROUND);
+        if !disabled && (hot || pressed) {
+            let background = if pressed { PRESSED } else { HOVER };
+            rounded(
+                item.hDC,
+                &inset(item.rcItem, pixels(1, dpi)),
+                pixels(5, dpi),
+                background,
+            );
+        }
+        let foreground = if disabled {
+            DISABLED_TEXT
+        } else if hot || pressed {
+            ACCENT
+        } else {
+            MUTED
+        };
+        // 轮廓向右靠近复选框，点击区域仍保持独立
+        let icon_rect = RECT {
+            left: item.rcItem.left + pixels(6, dpi),
+            ..item.rcItem
+        };
+        name_visibility_icon(item.hDC, icon_rect, dpi, foreground, selected);
+        if item.itemState & ODS_FOCUS != 0 && item.itemState & ODS_NOFOCUSRECT == 0 {
+            DrawFocusRect(item.hDC, &inset(item.rcItem, pixels(1, dpi)));
+        }
+        return true;
+    }
     let picker = matches!(style, ButtonStyle::Picker);
     let (background, border, foreground) = if disabled {
         (SUBTLE, BORDER, DISABLED_TEXT)

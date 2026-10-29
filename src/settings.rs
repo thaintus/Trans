@@ -49,6 +49,7 @@ pub struct Settings {
     pub close_to_tray: bool,
     pub self_transparency: u8,
     pub show_icons: bool,
+    pub show_window_name: bool,
     pub privacy_mode: bool,
     pub restore_hotkey: Option<Hotkey>,
     pub preset_levels: [u8; 5],
@@ -63,6 +64,7 @@ impl Default for Settings {
             close_to_tray: true,
             self_transparency: 0,
             show_icons: false,
+            show_window_name: true,
             privacy_mode: false,
             restore_hotkey: Some(Hotkey::default()),
             preset_levels: DEFAULT_PRESET_LEVELS,
@@ -141,12 +143,13 @@ impl Settings {
         })?;
         let (temporary, mut file) = create_temporary_file(directory)?;
         let mut content = format!(
-            "; Trans settings\nlanguage={}\ndefault_container={}\nclose_to_tray={}\nself_transparency={}\nshow_icons={}\nprivacy_mode={}\nrestore_hotkey={}\npreset_1={}\npreset_2={}\npreset_3={}\npreset_4={}\npreset_5={}\n",
+            "; Trans settings\nlanguage={}\ndefault_container={}\nclose_to_tray={}\nself_transparency={}\nshow_icons={}\nshow_window_name={}\nprivacy_mode={}\nrestore_hotkey={}\npreset_1={}\npreset_2={}\npreset_3={}\npreset_4={}\npreset_5={}\n",
             self.language.as_str(),
             self.default_container,
             self.close_to_tray,
             self.self_transparency,
             self.show_icons,
+            self.show_window_name,
             self.privacy_mode,
             format_hotkey(self.restore_hotkey),
             self.preset_levels[0],
@@ -272,6 +275,7 @@ fn parse_settings(content: &str) -> Result<Settings, String> {
                     })?;
             }
             "show_icons" => settings.show_icons = parse_bool(value, key, index + 1)?,
+            "show_window_name" => settings.show_window_name = parse_bool(value, key, index + 1)?,
             "privacy_mode" => settings.privacy_mode = parse_bool(value, key, index + 1)?,
             "restore_hotkey" => {
                 settings.restore_hotkey = Hotkey::parse_saved(value).map_err(|error| {
@@ -320,6 +324,7 @@ fn known_key(key: &str) -> bool {
             | "close_to_tray"
             | "self_transparency"
             | "show_icons"
+            | "show_window_name"
             | "privacy_mode"
             | "restore_hotkey"
             | "preset_1"
